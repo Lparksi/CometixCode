@@ -39,13 +39,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     # Upstream defines `just test` as green on a developer machine, and that is
-    # the only place it has ever been run from. Headless, 85 of 6272 tests fail:
-    # most render at the default width, which is `hooks.use_terminal_size()` ->
-    # crossterm `terminal::size()` -> `.unwrap_or((0, 0))` with no controlling
-    # terminal, so every default-width divider collapses to zero columns; the
-    # rest assert on host state a runner does not have. Until that is true on a
-    # runner, this job reports instead of blocking — a gate that is always red
-    # is a gate nobody reads.
+    # the only place it has ever been run from. How far that travels was
+    # measured here: with no controlling terminal, 85 of 6272 tests failed —
+    # a component that renders at the default width takes it from
+    # `hooks.use_terminal_size()` -> crossterm `terminal::size()` ->
+    # `.unwrap_or((0, 0))`, so every default-width divider collapsed to zero
+    # columns. Running in a pty sized like a developer's terminal leaves 27:
+    # host-state assertions (session resume, api-key approval, sandbox proxy,
+    # powershell/git) and timing ones, which a 2-core runner is entitled to be
+    # slow about. Until those are true on a runner, this job reports instead of
+    # blocking — a gate that is always red is a gate nobody reads.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
