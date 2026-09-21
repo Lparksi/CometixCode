@@ -137,24 +137,35 @@ jobs:
             archive="${stage}.tar.gz"
             tar -czf "${archive}" "${stage}"
           fi
+          # The staging tree has to go: it shares the archive's prefix, so
+          # leaving it behind would put a directory next to the archive in the
+          # artifact, and `gh release create dist/*` uploads directories as
+          # directories ("read dist/cometix-...: is a directory").
+          rm -rf "${stage}"
+
           echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
           ls -l "${archive}"
 
-      # Proves the archive is runnable as packaged, on the machine it will run
-      # on: the executable starts, and the ripgrep it will shell out to is there
-      # and runs too.
+      # Unpacks the archive rather than the staging tree, so what runs is what
+      # ships: executable bit, vendored ripgrep path, and all.
       - name: Smoke test
         if: matrix.native
         shell: bash
         env:
           RG_DIR: ${{ matrix.rg_dir }}
+          RG_EXT: ${{ matrix.rg_ext }}
         run: |
           set -euo pipefail
-          stage="${ARCHIVE%.tar.gz}"
-          stage="${stage%.zip}"
+          rm -rf unpacked && mkdir unpacked
+          if [ "${RG_EXT}" = "zip" ]; then
+            7z x -y -o"unpacked" "${ARCHIVE}" > /dev/null
+          else
+            tar -xzf "${ARCHIVE}" -C unpacked
+          fi
 
-          exe="${stage}/cometix"
-          rg="${stage}/vendor/ripgrep/${RG_DIR}/rg"
+          root=$(find unpacked -mindepth 1 -maxdepth 1 -type d -print -quit)
+          exe="${root}/cometix"
+          rg="${root}/vendor/ripgrep/${RG_DIR}/rg"
           if [ "${RUNNER_OS}" = "Windows" ]; then
             exe="${exe}.exe"
             rg="${rg}.exe"
@@ -188,8 +199,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            dist/*
+          set -uo pipefail
+          # An upload that fails after the release exists leaves a release with
+          # no assets behind it, and re-running the job would then stop at
+          # "release already exists". Upload to it instead of dying on it.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              dist/*
+          fi
