@@ -177,6 +177,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      # gh resolves the tag and the release target through the checkout; without
+      # one it fails with "not a git repository" before it ever calls the API.
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -186,6 +189,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
             dist/*
