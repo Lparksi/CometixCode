@@ -1,0 +1,191 @@
+# Packages a runnable release for every supported target.
+#
+# Each archive carries `vendor/ripgrep/<arch>-<os>/rg` beside the executable.
+# File search resolves ripgrep as an external asset (src/utils/ripgrep.rs) and
+# only falls back to a host `rg` when the packaged copy is absent, so an archive
+# without it is a binary that cannot search files on a machine without ripgrep.
+#
+# Tag pushes (`v*`) also publish a GitHub Release with the archives; branch
+# pushes only leave build artifacts behind.
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned so an upstream ripgrep release cannot silently change what an
+  # archive contains under an unchanged CometixCode commit.
+  RIPGREP_VERSION: 15.2.0
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-latest is arm64; the x64 build is a cross-build from it, which
+          # is why its smoke test is skipped (running it would need Rosetta).
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            rg_asset: aarch64-apple-darwin
+            rg_dir: arm64-darwin
+            rg_ext: tar.gz
+            native: true
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            rg_asset: x86_64-apple-darwin
+            rg_dir: x64-darwin
+            rg_ext: tar.gz
+            native: false
+          # musl: one static binary that runs on any glibc or musl distro,
+          # instead of one that needs the runner's glibc version or newer.
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            rg_asset: x86_64-unknown-linux-musl
+            rg_dir: x64-linux
+            rg_ext: tar.gz
+            native: true
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            rg_asset: x86_64-pc-windows-msvc
+            rg_dir: x64-win32
+            rg_ext: zip
+            native: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # oniguruma, ring and tree-sitter compile C/asm, so a musl target needs a
+      # musl-wrapped compiler. The Apple and MSVC toolchains are already on the
+      # macOS and Windows runners.
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          RG_ASSET: ${{ matrix.rg_asset }}
+          RG_DIR: ${{ matrix.rg_dir }}
+          RG_EXT: ${{ matrix.rg_ext }}
+        run: |
+          set -euo pipefail
+
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${version}-dev.$(git rev-parse --short HEAD)"
+          fi
+          stage="cometix-${version}-${TARGET}"
+
+          exe=cometix
+          if [ "${RUNNER_OS}" = "Windows" ]; then exe=cometix.exe; fi
+
+          # The sibling package layout the runtime resolves first.
+          rg_name="ripgrep-${RIPGREP_VERSION}-${RG_ASSET}"
+          curl -fsSL -o "ripgrep-download" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/${rg_name}.${RG_EXT}"
+          rm -rf rg-extract && mkdir -p rg-extract
+          if [ "${RG_EXT}" = "zip" ]; then
+            7z x -y -o"rg-extract" ripgrep-download > /dev/null
+          else
+            tar -xzf ripgrep-download -C rg-extract
+          fi
+          rg_bin=$(find rg-extract -type f \( -name rg -o -name rg.exe \) -print -quit)
+          if [ -z "${rg_bin}" ]; then
+            echo "no ripgrep binary inside ${rg_name}.${RG_EXT}" >&2
+            exit 1
+          fi
+
+          rm -rf "${stage}"
+          mkdir -p "${stage}/vendor/ripgrep/${RG_DIR}"
+          cp "target/${TARGET}/release/${exe}" "${stage}/${exe}"
+          cp "${rg_bin}" "${stage}/vendor/ripgrep/${RG_DIR}/$(basename "${rg_bin}")"
+          curl -fsSL -o "${stage}/vendor/ripgrep/COPYING" \
+            "https://raw.githubusercontent.com/BurntSushi/ripgrep/${RIPGREP_VERSION}/COPYING"
+
+          if [ "${RG_EXT}" = "zip" ]; then
+            archive="${stage}.zip"
+            7z a -tzip "${archive}" "${stage}" > /dev/null
+          else
+            archive="${stage}.tar.gz"
+            tar -czf "${archive}" "${stage}"
+          fi
+          echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
+          ls -l "${archive}"
+
+      # Proves the archive is runnable as packaged, on the machine it will run
+      # on: the executable starts, and the ripgrep it will shell out to is there
+      # and runs too.
+      - name: Smoke test
+        if: matrix.native
+        shell: bash
+        env:
+          RG_DIR: ${{ matrix.rg_dir }}
+        run: |
+          set -euo pipefail
+          stage="${ARCHIVE%.tar.gz}"
+          stage="${stage%.zip}"
+
+          exe="${stage}/cometix"
+          rg="${stage}/vendor/ripgrep/${RG_DIR}/rg"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            exe="${exe}.exe"
+            rg="${rg}.exe"
+          fi
+
+          "./${exe}" --version
+          "./${rg}" --version
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: cometix-*
+          if-no-files-found: error
+
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*

@@ -1,0 +1,58 @@
+# Gates on every push and pull request.
+#
+# Both jobs drive the project's own justfile rather than raw cargo. `cargo test`
+# is not a valid gate for this crate — the suite depends on process isolation
+# plus pinned host state — so CI reuses `just test` verbatim instead of keeping
+# a second, drifting copy of those pins.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: check (lib + tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --lib --tests
+
+  test:
+    name: test (nextest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest,just
+      - uses: Swatinem/rust-cache@v2
+
+      # File search shells out to `rg`, and parts of the suite exercise both the
+      # packaged lookup and the host fallback, so a host `rg` has to exist.
+      - name: Ensure host ripgrep
+        run: command -v rg || (sudo apt-get update && sudo apt-get install -y ripgrep)
+
+      # --retries 2: the suite has documented load-sensitive flakes, and a
+      # 2-core runner is exactly the contention they fail under. nextest reports
+      # a retried-then-passing test as flaky, so this separates "flaky" from
+      # "actually red" instead of hiding either.
+      - run: just test --retries 2
