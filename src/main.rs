@@ -11,7 +11,7 @@
 
 use crate::bootstrap;
 use crate::commands;
-use crate::components::spinner::SpinnerGlyph;
+use crate::components::spinner::Spinner;
 use crate::hooks::notifs::startup::startup_notifications;
 use crate::hooks::notifs::statusline::status_line_trust_blocked_notification;
 use crate::interactive_helpers::{
@@ -1087,7 +1087,7 @@ fn Main(props: &MainProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     } else if resolved_commands.read().is_none() || resolved_initial_tools.read().is_none() {
         element! {
             View(flex_direction: FlexDirection::Row) {
-                SpinnerGlyph(frame: 0usize)
+                Spinner
                 Text(content: " Loading commands…".to_string(), wrap: TextWrap::NoWrap)
             }
         }
@@ -1253,45 +1253,12 @@ fn Main(props: &MainProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     )
                                     .map(Some)
                                 })();
-                                // Cometix-specific: convert the resumed
-                                // assistant text on this worker's thread pool
-                                // before the REPL mounts, so the first frame
-                                // renders Markdown from the cache (see
-                                // `markdown::prewarm_markdown_blocks`).
-                                if let Ok(Some(processed)) = &restored {
-                                    let width =
-                                        crate::utils::asciicast::get_terminal_size().0 as usize;
-                                    let contents: Vec<String> = processed
-                                        .messages
-                                        .iter()
-                                        .filter_map(|message| match message {
-                                            crate::types::message::Message::Assistant(assistant) => {
-                                                Some(&assistant.content)
-                                            }
-                                            _ => None,
-                                        })
-                                        .flatten()
-                                        .filter_map(|block| match block {
-                                            crate::types::message::AssistantContent::Text(text) => {
-                                                Some(text.clone())
-                                            }
-                                            crate::types::message::AssistantContent::Thinking {
-                                                text,
-                                                ..
-                                            } => Some(text.clone()),
-                                            _ => None,
-                                        })
-                                        .collect();
-                                    crate::components::markdown::prewarm_markdown_blocks(
-                                        contents, width,
-                                    );
-                                }
                                 let _ = restore_tx.send_blocking(restored);
                             });
                         }
                         element! {
                             View(flex_direction: FlexDirection::Row) {
-                                SpinnerGlyph(frame: 0usize)
+                                Spinner
                                 Text(
                                     content: " Resuming conversation…".to_string(),
                                     wrap: TextWrap::NoWrap,

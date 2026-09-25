@@ -95,51 +95,6 @@ fn token_cache() -> &'static Mutex<TokenCache> {
     CACHE.get_or_init(|| Mutex::new(TokenCache::default()))
 }
 
-/// Rendered blocks per (content hash, width): the output of
-/// [`markdown_to_blocks_with_width`], which every `Markdown` mount and
-/// re-render otherwise recomputes from the cached tokens. Same bounded LRU
-/// shape as [`TokenCache`]; [`prewarm_markdown_blocks`] fills it ahead of
-/// the first render.
-#[derive(Default)]
-struct BlocksCache {
-    entries: HashMap<(u64, usize), Vec<MarkdownRenderBlock>>,
-    order: VecDeque<(u64, usize)>,
-}
-
-impl BlocksCache {
-    fn get(&mut self, key: (u64, usize)) -> Option<Vec<MarkdownRenderBlock>> {
-        let value = self.entries.get(&key)?.clone();
-        if let Some(pos) = self.order.iter().position(|existing| *existing == key) {
-            self.order.remove(pos);
-        }
-        self.order.push_back(key);
-        Some(value)
-    }
-
-    fn insert(&mut self, key: (u64, usize), value: Vec<MarkdownRenderBlock>) {
-        if self.entries.contains_key(&key) {
-            self.entries.insert(key, value);
-            if let Some(pos) = self.order.iter().position(|existing| *existing == key) {
-                self.order.remove(pos);
-            }
-            self.order.push_back(key);
-            return;
-        }
-        if self.entries.len() >= TOKEN_CACHE_MAX {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            }
-        }
-        self.order.push_back(key);
-        self.entries.insert(key, value);
-    }
-}
-
-fn blocks_cache() -> &'static Mutex<BlocksCache> {
-    static CACHE: OnceLock<Mutex<BlocksCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(BlocksCache::default()))
-}
-
 fn content_hash(content: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     content.hash(&mut hasher);
@@ -342,53 +297,6 @@ pub fn markdown_to_blocks_with_width(
     content: &str,
     terminal_width: usize,
 ) -> Vec<MarkdownRenderBlock> {
-    let key = (content_hash(content), terminal_width);
-    if let Ok(mut cache) = blocks_cache().lock() {
-        if let Some(hit) = cache.get(key) {
-            return hit;
-        }
-    }
-    let blocks = markdown_to_blocks_uncached(content, terminal_width);
-    if let Ok(mut cache) = blocks_cache().lock() {
-        cache.insert(key, blocks.clone());
-    }
-    blocks
-}
-
-/// Converts every content in parallel and leaves the results in the blocks
-/// cache, so the `Markdown` components mounted by the first render find
-/// their blocks ready instead of each converting on the render thread.
-///
-/// Cometix-specific deviation: CC converts inside each `Markdown` render and
-/// has no such cache; on a 2M-token session that conversion was 520ms of
-/// the first frame's 772ms update (29 messages, 139k chars). The resume
-/// worker calls this off the render loop with the terminal's current width,
-/// which is what `Markdown` reads from `use_terminal_size`; a resize before
-/// the first render simply misses the cache and converts as before.
-pub fn prewarm_markdown_blocks(contents: Vec<String>, terminal_width: usize) {
-    if contents.is_empty() {
-        return;
-    }
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(8)
-        .min(contents.len());
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| loop {
-                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(content) = contents.get(index) else {
-                    break;
-                };
-                let _ = markdown_to_blocks_with_width(content, terminal_width);
-            });
-        }
-    });
-}
-
-fn markdown_to_blocks_uncached(content: &str, terminal_width: usize) -> Vec<MarkdownRenderBlock> {
     let tokens = cached_parse_markdown(content);
     let mut blocks = Vec::new();
     let mut non_table_content = String::new();
@@ -1132,31 +1040,6 @@ pub fn StreamingMarkdown(
 mod tests {
     use super::*;
     use crate::components::markdown_table::wrap_table_cell;
-
-    #[test]
-    fn prewarmed_blocks_match_direct_conversion_and_key_on_width() {
-        let contents = vec![
-            "# Title\n\nSome *emphasis* and `code`.\n\n- one\n- two".to_string(),
-            "| a | b |\n|---|---|\n| 1 | 2 |".to_string(),
-            "plain text with no markdown at all".to_string(),
-        ];
-        let expected: Vec<_> = contents
-            .iter()
-            .map(|content| markdown_to_blocks_uncached(content, 60))
-            .collect();
-        prewarm_markdown_blocks(contents.clone(), 60);
-        for (content, expected) in contents.iter().zip(&expected) {
-            assert_eq!(&markdown_to_blocks_with_width(content, 60), expected);
-            // A different width is a different key; it must still convert
-            // correctly rather than return the 60-column result.
-            assert_eq!(
-                markdown_to_blocks_with_width(content, 30),
-                markdown_to_blocks_uncached(content, 30)
-            );
-        }
-        let key = (content_hash(&contents[1]), 60usize);
-        assert!(blocks_cache().lock().unwrap().get(key).is_some());
-    }
 
     #[test]
     fn markdown_plain_fast_path_skips_parser_shape() {
