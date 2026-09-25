@@ -140,8 +140,9 @@ impl AsciicastRecorder {
     }
 }
 
-/// Maps to: CC `utils/asciicast.ts#getTerminalSize:118-125`.
-fn get_terminal_size() -> (u16, u16) {
+/// Maps to: CC `utils/asciicast.ts#getTerminalSize:118-125`. Also used by
+/// the resume worker to prewarm Markdown at the width the REPL will render.
+pub(crate) fn get_terminal_size() -> (u16, u16) {
     // stdout dimensions, not crossterm's fallback /dev/tty or stderr size.
     #[cfg(unix)]
     {
